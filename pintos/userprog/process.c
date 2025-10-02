@@ -250,10 +250,10 @@ int process_exec(void *f_name) {
   _if.cs = SEL_UCSEG;
   _if.eflags = FLAG_IF | FLAG_MBS;
 
-  if (is_kernel_vaddr(f_name)) {
-    /* We first kill the current context */
-    process_cleanup();
-  }
+  // if (is_kernel_vaddr(f_name)) {
+  //   /* We first kill the current context */
+  // }
+  process_cleanup();
 
   lock_acquire(&filesys_lock);
   /* And then load the binary */
@@ -324,8 +324,8 @@ void process_exit(void) {
    * TODO: We recommend you to implement process resource cleanup here. */
   // printf("process_exit ");
 
-  sema_up(&curr->wait_sema);    // 세마 up 하고 좀비 프로세스가 됨
-  sema_down(&curr->exit_sema);  //그 뒤에 BLOCK되서 커널이 깨워줘야 함
+  sema_up(&curr->wait_sema);  // 세마 up 하고 좀비 프로세스가 됨
+  sema_down(&curr->exit_sema);  // 부모가 status 회수 전까지 파괴를 미룸
   process_cleanup();
 }
 
@@ -758,7 +758,8 @@ static bool lazy_load_segment(struct page *page, void *aux) {
   }
   //나머지 공간은 0으로 채움
   memset(kpage + page_read_bytes, 0, page_zero_bytes);
-
+  file_close(file);
+  free(aux);
   return true;
 }
 
@@ -836,6 +837,11 @@ static bool setup_stack(struct intr_frame *if_) {
   success = vm_claim_page(stack_bottom);
   if (success) {
     if_->rsp = USER_STACK;
+#ifdef VM
+    struct thread *t = thread_current();
+    t->stack_pointer = (void *)USER_STACK;            // 최초 유저 RSP
+    t->stack_bottom = (void *)(USER_STACK - PGSIZE);  // 현재 스택 바닥(옵션)
+#endif
   }
   return success;
 }

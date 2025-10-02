@@ -76,10 +76,16 @@ static void uninit_destroy(struct page *page) {
   // Lazy load를 위해 파일 포인터/오프셋/읽을 바이트 수 등의 정보를 aux에 담아 두는데
   // 해당 페이지가 한 번도 클레임/폴트되지 않은 채로 정리되는 경우 메모리가 누수될 수 있음
   // 따라서 UNINIT destroy에서 aux를 해제해 리소스 누수를 막음
-  free(uninit->aux);
   // TODO: VM_FILE 등 다른 타입을 지원하게 되면 파일 핸들 정리를 추가
-
-  uninit->aux = NULL;               // 포인터를 비워 이중 해제를 방지
+  if (uninit->aux) {
+    enum vm_type base = VM_TYPE(uninit->type);
+    if (base == VM_FILE) {
+      struct aux *a = uninit->aux;
+      if (a->file) file_close(a->file);
+    }
+    free(uninit->aux);
+    uninit->aux = NULL;
+  }
   uninit->init = NULL;              // 추가 초기화 콜백도 제거
   uninit->page_initializer = NULL;  // 타입별 초기화기 포인터 초기화
 }

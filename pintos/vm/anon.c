@@ -1,6 +1,7 @@
 /* anon.c: Implementation of page for non-disk image (a.k.a. anonymous page). */
 
 #include <bitmap.h>  // 스왑 슬롯 사용 여부를 추적하는 비트맵 유틸리티.
+#include <string.h>
 
 #include "debug.h"
 #include "devices/disk.h"
@@ -78,22 +79,31 @@ bool anon_initializer(struct page *page, enum vm_type type, void *kva) {
 /* Swap in the page by read contents from the swap disk. */
 static bool anon_swap_in(struct page *page, void *kva) {
   struct anon_page *anon_page = &page->anon;
+  // 최소 구현
+  if (anon_page->swap_slot == ANON_SWAP_SLOT_INVALID) {
+    memset(kva, 0, PGSIZE);  // 스택/새 anon 페이지는 제로필
+    return true;
+  }
+  return false;  // 스왑을 사용하는 단계에서 다시 구현
 }
 
 /* Swap out the page by writing contents to the swap disk. */
-static bool anon_swap_out(struct page *page) { struct anon_page *anon_page = &page->anon; }
+static bool anon_swap_out(struct page *page UNUSED) {
+  // 최소 구현
+  return false;  // 아직 스왑 아웃을 지원하지 않는다
+}
 
 /* Destroy the anonymous page. PAGE will be freed by the caller. */
 static void anon_destroy(struct page *page) {
   // 익명 페이지 메타데이터(스왑 슬롯 정보)
   struct anon_page *anon = &page->anon;
   struct thread *t = thread_current();
+  uint64_t *pml4 = t->pml4;  // initd 초기 단계에서는 NULL 일 수 있음.
 
   // 메모리에 적재된 상태였다면 프레임을 해제
   if (page->frame != NULL) {
-    // pte 언매핑
-    if (pml4_get_page(t->pml4, page->va) != NULL) {
-      pml4_clear_page(t->pml4, page->va);
+    if (pml4 != NULL && pml4_get_page(pml4, page->va) != NULL) {
+      pml4_clear_page(pml4, page->va);
     }
     vm_free_frame(page->frame);
     page->frame = NULL;
@@ -101,9 +111,7 @@ static void anon_destroy(struct page *page) {
   // 스왑 슬롯을 사용했다면 반환
   if (swap_bitmap != NULL && anon->swap_slot != ANON_SWAP_SLOT_INVALID) {
     lock_acquire(&swap_lock);
-    // 슬롯을 비어 있음으로 표시 (false)
     bitmap_set(swap_bitmap, anon->swap_slot, false);
-    // 슬롯 번호를 초기화해 재사용을 방지
     anon->swap_slot = ANON_SWAP_SLOT_INVALID;
     lock_release(&swap_lock);
   }

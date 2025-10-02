@@ -28,6 +28,7 @@ enum vm_type {
   VM_MARKER_END = (1 << 31),
 };
 #define VM_TYPE(type) ((type)&7)
+#define STACK_LIMIT (USER_STACK - (1 << 20))
 
 // 전방 선언 (포인터 인자/필드에서 사용 가능)
 struct page;
@@ -61,11 +62,10 @@ struct page {
   const struct page_operations *operations;
   void *va;            /* Address in terms of user space */
   struct frame *frame; /* Back reference for frame */
-
   /* Your implementation */
   struct hash_elem h_elem;
   bool writable;
-
+  struct list_elem aux_elem;  // added
   /* Per-type data are binded into the union.
    * Each function automatically detects the current union */
   union {
