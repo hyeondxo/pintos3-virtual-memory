@@ -1,131 +1,251 @@
-# 📘 Docker기반 Pintos 개발 환경 구축 가이드 
+# **Pintos Project 3 — Virtual Memory**
 
-이 문서는 **Windows**와 **macOS** 사용자가 Docker와 VSCode DevContainer 기능을 활용하여 Pintos OS 프로젝트를 빠르게 구축할 수 있도록 도와줍니다.
+**Pintos**는 교육용 운영체제 커널입니다. 리눅스처럼 거대한 코드베이스를 한 번에 이해하기 어렵다는 문제를 해결하기 위해, **작고 읽기 쉬우며 실험 가능한** 커널 골격을 제공합니다. 학생은 여기에 **스레드, 프로세스, 파일 시스템, 가상 메모리** 같은 핵심 기능을 직접 붙여 넣으며, 단순한 라이브러리 코딩이 아닌 **시스템 수준의 설계·디버깅 경험**을 얻게 됩니다.
 
-[**주의**]
-* ubunbu:22.04 버전은 충분한 테스트와 검증이 되지 않았습니다. 이 점을 주의해서 사용하시기 바랍니다.
+Project 3의 주제인 **가상 메모리(Virtual Memory)** 는 현대 OS가 프로세스들을 **서로 격리**하고, **메모리를 효율적으로 사용**하며, **큰 프로그램도 적은 물리 메모리에서 실행**되게 하는 핵심 기술입니다. 이 과제를 통해 “페이지 폴트가 왜 생기고, OS가 그 순간 무슨 일을 하는가?”를 실제 커널 코드로 체감하게 됩니다.
 
-[**참고**] 
-* pintos 도커 환경은 `64비트 기반 X86-64` 기반의 `ubuntu:22.04` 버전을 사용합니다.
-   * kaist-pintos는 오리지널 pintos와 달리 64비트 환경을 지원합니다.
-   * 이번 도커 환경은 ubuntu 22.04를 지원하여 vscode의 최신 버전에서 원격 연결이 안되는 문제를 해결하였습니다.
-* pintos 도커 환경은 kaist-pintos에서 추천하는 qemu 에뮬레이터를 설치하고 사용합니다. 
-* pintos 도커 환경은 9주차부터 13주차까지 같은 환경을 사용합니다. 이 기간동안 별도의 개발 환경을 제공하지 않습니다.
-* 기존 도커 환경과 달리 `vscode`와 통합된 디버깅 환경(F5로 시작하는)을 제공하지 않습니다. 디버깅이 필요한 경우 `gdb`를 사용하세요. 
-* vscode에서 터미널을 오픈하면 자동으로 `source /workspaces/pintos_22.04_lab_docker/pintos/activate`를 실행합니다.
 
----
+## **프로젝트: 3 (가상 메모리)**
 
-## 1. Docker란 무엇인가요?
+- **무엇을 만드나?**
+    
+    페이지 단위로 메모리를 관리하는 **가상 메모리 서브시스템**을 확장합니다. 필요할 때만 페이지를 채우는 **지연 로딩(lazy/demand paging)**, 물리 메모리가 모자라면 디스크로 내보내는 **스왑(swap)**, 파일 내용을 메모리에 투명하게 매핑하는 **mmap/munmap** 등을 구현합니다.
+    
+- **왜 배우나?**
+    - **격리와 안정성**: 잘못된 접근을 잡아내고 프로세스를 종료하는 **페이지 폴트 처리**를 익힙니다.
+    - **효율성**: 실제로 접근한 데이터만 로딩하는 **지연 로딩**으로 입출력과 메모리 낭비를 줄입니다.
+    - **자원 관리**: **프레임 테이블 + 교체 정책**으로 물리 메모리를 공정하게 배분합니다.
+    - **영속성과 일관성**: 파일-백드 페이지의 **쓰기 반영(write-back)** 과 **동기화**를 다룹니다.
+    - **경합/락 설계**: 여러 실행 흐름이 동일 자원을 안전하게 공유하도록 **동기화**를 설계합니다.
 
-**Docker**는 애플리케이션을 어떤 컴퓨터에서든 **동일한 환경에서 실행**할 수 있게 도와주는 **가상화 플랫폼**입니다.  
 
-Docker는 다음 구성요소로 이루어져 있습니다:
+## **구현 기능 요약 (설계 포인트)**
 
-- **Docker Engine**: 컨테이너를 실행하는 핵심 서비스
-- **Docker Image**: 컨테이너 생성에 사용되는 템플릿 (레시피 📃)
-- **Docker Container**: 이미지를 기반으로 생성된 실제 실행 환경 (요리 🍜)
+### **1) 보조 페이지 테이블(Supplemental Page Table; SPT)**
 
-### ✅ AWS EC2와의 차이점
+- **하는 일**: “이 가상 주소의 페이지는 어떤 타입이고, 어디서 어떻게 채워야 하는가?”를 기록하는 **프로세스 전용 메타데이터** 사전입니다.
+- **왜 필요?**: 하드웨어 페이지 테이블은 “매핑됨/안 됨”만 알기 쉬운데, **어떻게 로드할지**(파일에서? 스왑에서? 0으로?)는 OS가 기억해야 함.
+- **설계 포인트**
+    - 해시/트리 등으로 **빠른 조회**(평균 O(1))
+    - 키: 페이지 **기준 주소(페이지 정렬된 VA)**
+    - 값: **페이지 타입(익명/파일-백드)**, 소스(파일+오프셋/스왑 슬롯), 권한 등
 
-| 구분 | EC2 같은 VM | Docker 컨테이너 |
-|------|-------------|-----------------|
-| 실행 단위 | OS 포함 전체 | 애플리케이션 단위 |
-| 실행 속도 | 느림 (수십 초 이상) | 매우 빠름 (거의 즉시) |
-| 리소스 사용 | 무거움 | 가벼움 |
+### **2) 지연 로딩(Lazy Loading) & 수요 페이징(Demand Paging)**
 
----
+- **하는 일**: 실행 시 파일 전체를 읽지 않고, **접근하는 순간**(페이지 폴트 시) 필요한 페이지만 로드합니다.
+- **설계 포인트**
+    - SPT에 “어떻게 채울지”만 미리 적어 놓고, **첫 접근 때 vm_claim_page()** 로 실제 할당/적재
+    - 파일-백드: 파일에서 읽어 채움, 익명: 0으로 초기화
 
-## 2. VSCode DevContainer란 무엇인가요?
+### **3) 프레임 테이블(Frame Table) & 교체 정책(Eviction)**
 
-**DevContainer**는 VSCode에서 Docker 컨테이너를 **개발 환경**처럼 사용할 수 있게 해주는 기능입니다.
+- **하는 일**: “RAM에 어떤 페이지가 어느 프레임에 들어있는지”를 추적하고, RAM이 가득 차면 **누구를 내보낼지** 결정합니다.
+- **교체 정책**: 예) **Clock/Second-chance** — 최근에 안 쓰인 페이지부터 희생
+- **설계 포인트**
+    - 프레임 <-> SPT 엔트리 간 **양방향 연결**(역참조)
+    - I/O 중인 프레임은 **핀(pin)** 으로 잠깐 희생 금지
+    - 락 순서/보유 기간을 짧게 유지해 **교착 방지**
 
-- 코드를 실행하거나 디버깅할 때 **컨테이너 내부 환경에서 동작**
-- 팀원 간 **환경 차이 없이 동일한 개발 환경 구성** 가능
-- `.devcontainer` 폴더에 정의된 설정을 VSCode가 읽어 자동 구성
+### **4) 스왑(Swap) — 익명 페이지 내보내기/가져오기**
 
----
+- **하는 일**: 익명 페이지(스택/힙 등)를 디스크 **스왑 영역**에 저장했다가 필요하면 다시 불러옵니다.
+- **설계 포인트**
+    - “한 페이지 = 고정된 섹터 수” 단위로 **슬롯 관리**(할당/해제 비트맵 등)
+    - 스왑아웃: 프레임 → 디스크, SPT에 “이 페이지는 스왑 슬롯 #n”으로 갱신
+    - 스왑인: 다시 RAM으로 가져오고 슬롯 해제
 
-## 3. Docker Desktop 설치하기
+### **5) 파일-백드 페이지 & 메모리 매핑(mmap/munmap)**
 
-1. Docker 공식 사이트에서 설치 파일 다운로드:  
-   👉 [https://www.docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop)
+- **하는 일**: 파일의 일부를 메모리에 매핑하여 **파일 I/O를 메모리 접근처럼** 사용할 수 있게 합니다.
+- **지연 로딩**과 결합되어, 접근 시 해당 부분만 파일에서 읽어 옵니다.
+- **munmap**: 더티 페이지는 파일에 **write-back**, 클린 페이지는 해제
+- **주소 선택 힌트**: addr == NULL 인 경우, **연속된 빈 가상 주소 구간**을 찾아 시작 주소를 정합니다(페이지 정렬/유저 영역/겹침 금지 검사).
 
-2. 설치 후 Docker Desktop 실행  
-   - Windows: Docker 아이콘이 트레이에 떠야 함  
-   - macOS: 상단 메뉴바에 Docker 아이콘 확인
+### **6) 스택 자동 성장(Stack Growth)**
 
----
+- **하는 일**: 프로그램이 스택을 조금씩 더 쓰면, OS가 **허용 범위 내에서** 새 페이지를 만들어 스택을 확장합니다.
+- **설계 포인트**
+    - “폴트 주소가 현재 스택 포인터 근처인가?” 등 **합법 조건** 판정
+    - 성공 시 익명 페이지를 **claim** 해서 0-초기화
 
-## 4. 프로젝트 파일 다운로드 (히스토리 없이)
+### **7) 페이지 폴트 처리기(Page Fault Handler)**
 
-터미널(CMD, PowerShell, zsh 등)에서 아래 명령어로 프로젝트 폴더만 내려받습니다:
+- **하는 일**: 접근 예외가 나면 원인을 분석(존재X/권한X/커널 접근 등)하고, **정상적인 경우에는 필요한 페이지를 즉시 준비**합니다.
+- **일반 흐름**
+    1. SPT 조회 → 있으면 타입별 로드(파일/스왑/0-fill)
+    2. 없으면 **스택 성장 조건**인지 확인 후 확장
+    3. 진짜 오류(권한 위반 등)면 프로세스 종료
 
-```bash
-git clone --depth=1 https://github.com/krafton-jungle/pintos_lab_docker.git
-```
+### **8) 동기화 & 오류 처리**
 
-- `--depth=1` 옵션은 git commit 히스토리를 생략하고 **최신 파일만 가져옵니다.**
+- **하는 일**: 파일 시스템 락, 프레임 락, SPT 락 등 **여러 락의 순서**를 안정적으로 맞춰 교착을 방지합니다.
+- **설계 포인트**
+    - **락 획득/해제의 일관성**
+    - 인터럽트 컨텍스트에서 금지해야 할 작업 회피
+    - 실패 시 **자원 정리**(파일 핸들/슬롯/프레임) 확실히
 
-### 📂 다운로드 후 폴더 구조 설명
 
-```
-pintos_22.04_lab_docker/
-├── .devcontainer/
-│   ├── devcontainer.json      # VSCode에서 컨테이너 환경 설정
-│   └── Dockerfile             # pintos 개발 환경 도커 이미지 정의
-│
-├── pintos
-│   ├── threads                # 9주차 threads 프로젝트 폴더
-│   ├── userprog               # 10-11주차 user program 프로젝트 폴더
-│   └── vm                     # 12-13주차 virtual memory 프로젝트 폴더
-│
-└── README.md                  # 현재 문서
-```
----
+## **디렉터리 개요**
 
-## 5. VSCode에서 해당 프로젝트 폴더 열기
+- pintos/vm/ : VM 핵심 코드(페이지 타입, 프레임/스왑/클레임 로직 등)
+- pintos/userprog/ : 시스템콜, 프로세스 로딩/페이지 폴트 진입부
+- pintos/threads/ : 스케줄러·락·페이지 할당자 등 커널 공통
+- pintos/tests/ : 채점 및 개별 테스트 프로그램(과제 배포본 기준)
 
-1. VSCode를 실행
-2. `파일 → 폴더 열기`로 방금 클론한 `pintos_22.04_lab_docker` 폴더를 선택
 
----
+## 테스트 결과
 
-## 6. 개발 컨테이너: 컨테이너에서 열기
+ <img src="Pintos_VM_result.PNG" width="400px">
 
-1. VSCode에서 `Ctrl+Shift+P` (Windows/Linux) 또는 `Cmd+Shift+P` (macOS)를 누릅니다.
-2. 명령어 팔레트에서 `Dev Containers: Reopen in Container`를 선택합니다.
-3. 이후 컨테이너가 자동으로 실행되고 빌드됩니다. 처음 컨테이너를 열면 빌드하는 시간이 오래걸릴 수 있습니다. 빌드 후, 프로젝트가 **컨테이너 안에서 실행됨**.
-
----
-
-## 7. C 파일에 브레이크포인트 설정 후 디버깅 (F5)
-pintos 랩에서는 vscode기반의 디버깅을 지원하지 않습니다. 
-
----
-## 8. 새로운 Git 리포지토리에 Commit & Push 하기
-
-금주 프로젝트를 개인 Git 리포와 같은 다른 리포지토리에 업로드하려면, 기존 Git 연결을 제거하고 새롭게 초기화해야 합니다.
-
-### ✅ 완전히 새로운 Git 리포로 업로드하는 방법
-
-아래 명령어를 순서대로 실행하세요:
 
 ```bash
-rm -rf .git
-git init
-git remote add origin https://github.com/myusername/my-new-repo.git
-git add .
-git commit -m "Clean start"
-git push -u origin main
+=== Test Summary ===
+Passed: 140
+  - args-none
+  - args-single
+  - args-multiple
+  - args-many
+  - args-dbl-space
+  - halt
+  - exit
+  - create-normal
+  - create-empty
+  - create-null
+  - create-bad-ptr
+  - create-long
+  - create-exists
+  - create-bound
+  - open-normal
+  - open-missing
+  - open-boundary
+  - open-empty
+  - open-null
+  - open-bad-ptr
+  - open-twice
+  - close-normal
+  - close-twice
+  - close-bad-fd
+  - read-normal
+  - read-bad-ptr
+  - read-boundary
+  - read-zero
+  - read-stdout
+  - read-bad-fd
+  - write-normal
+  - write-bad-ptr
+  - write-boundary
+  - write-zero
+  - write-stdin
+  - write-bad-fd
+  - fork-once
+  - fork-multiple
+  - fork-recursive
+  - fork-read
+  - fork-close
+  - fork-boundary
+  - exec-once
+  - exec-arg
+  - exec-boundary
+  - exec-missing
+  - exec-bad-ptr
+  - exec-read
+  - wait-simple
+  - wait-twice
+  - wait-killed
+  - wait-bad-pid
+  - multi-recurse
+  - multi-child-fd
+  - rox-simple
+  - rox-child
+  - rox-multichild
+  - bad-read
+  - bad-write
+  - bad-read2
+  - bad-write2
+  - bad-jump
+  - bad-jump2
+  - pt-grow-stack
+  - pt-grow-bad
+  - pt-big-stk-obj
+  - pt-bad-addr
+  - pt-bad-read
+  - pt-write-code
+  - pt-write-code2
+  - pt-grow-stk-sc
+  - page-linear
+  - page-parallel
+  - page-merge-seq
+  - page-merge-par
+  - page-merge-stk
+  - page-merge-mm
+  - page-shuffle
+  - mmap-read
+  - mmap-close
+  - mmap-unmap
+  - mmap-overlap
+  - mmap-twice
+  - mmap-write
+  - mmap-ro
+  - mmap-exit
+  - mmap-shuffle
+  - mmap-bad-fd
+  - mmap-clean
+  - mmap-inherit
+  - mmap-misalign
+  - mmap-null
+  - mmap-over-code
+  - mmap-over-data
+  - mmap-over-stk
+  - mmap-remove
+  - mmap-zero
+  - mmap-bad-fd2
+  - mmap-bad-fd3
+  - mmap-zero-len
+  - mmap-off
+  - mmap-bad-off
+  - mmap-kernel
+  - lazy-file
+  - lazy-anon
+  - swap-file
+  - swap-anon
+  - swap-iter
+  - swap-fork
+  - lg-create
+  - lg-full
+  - lg-random
+  - lg-seq-block
+  - lg-seq-random
+  - sm-create
+  - sm-full
+  - sm-random
+  - sm-seq-block
+  - sm-seq-random
+  - syn-read
+  - syn-remove
+  - syn-write
+  - alarm-single
+  - alarm-multiple
+  - alarm-simultaneous
+  - alarm-priority
+  - alarm-zero
+  - alarm-negative
+  - priority-change
+  - priority-donate-one
+  - priority-donate-multiple
+  - priority-donate-multiple2
+  - priority-donate-nest
+  - priority-donate-sema
+  - priority-donate-lower
+  - priority-fifo
+  - priority-preempt
+  - priority-sema
+  - priority-condvar
+  - priority-donate-chain
+Failed: 0
 ```
 
-### 📌 설명
+## **참고 자료**
 
-- `rm -rf .git`: 기존 Git 기록과 연결을 완전히 삭제합니다.
-- `git init`: 현재 폴더를 새로운 Git 리포지토리로 초기화합니다.
-- `git remote add origin ...`: 새로운 리포지토리 주소를 origin으로 등록합니다.
-- `git add .` 및 `git commit`: 모든 파일을 커밋합니다.
-- `git push`: 새로운 리포에 최초 업로드(Push)합니다.
-
-이 과정을 거치면 기존 리포와의 연결은 완전히 제거되고, **새로운 독립적인 프로젝트로 관리**할 수 있습니다.
+- KAIST Pintos Project 3 공식 문서
+    
+    https://casys-kaist.github.io/pintos-kaist/project3/introduction.html
